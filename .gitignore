@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv_fraud/
+env/
+venv/
+
+# Data files (optional but recommended)
+data/raw/
+data/processed/
+
+# Models & outputs (avoid large files)
+models/
+outputs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
