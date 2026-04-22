@@ -73,37 +73,15 @@ class FederatedClient:
     #     return balanced_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     def get_tf_dataset(self, batch_size=None):
-        """Create a balanced TensorFlow dataset with better sampling"""
-        
+        """Create a TensorFlow dataset (relying on class_weights for imbalance)"""
         if batch_size is None:
             batch_size = self.batch_size
         
-        # Handle class imbalance with better sampling
-        fraud_indices = np.where(self.labels == 1)[0]
-        legit_indices = np.where(self.labels == 0)[0]
+        # shuffle and batch the raw dataset directly
+        dataset = tf.data.Dataset.from_tensor_slices((self.features, self.labels))
+        dataset = dataset.shuffle(buffer_size=10000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
         
-        # If no fraud samples, return regular dataset
-        if len(fraud_indices) == 0:
-            dataset = tf.data.Dataset.from_tensor_slices((self.features, self.labels))
-            return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-        
-        # Create separate datasets for fraud and legit
-        fraud_dataset = tf.data.Dataset.from_tensor_slices(
-            (self.features[fraud_indices], self.labels[fraud_indices])
-        ).repeat()
-        
-        legit_dataset = tf.data.Dataset.from_tensor_slices(
-            (self.features[legit_indices], self.labels[legit_indices])
-        ).repeat()
-        
-        # Sample with 70/30 probability (favor fraud samples more)
-        balanced_dataset = tf.data.Dataset.sample_from_datasets(
-            [fraud_dataset, legit_dataset],
-            weights=[0.7, 0.3],  # 70% fraud, 30% legitimate
-            stop_on_empty_dataset=True
-        )
-        
-        return balanced_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        return dataset
     
     def evaluate(self, model):
         """Evaluate model on client data"""

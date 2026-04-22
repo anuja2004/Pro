@@ -31,7 +31,7 @@ if __name__ == "__main__":
     print()
     
     # Build command
-    cmd = f"python main.py --rounds {args.rounds}"
+    cmd = f"python3 main.py --rounds {args.rounds}"
     if args.privacy:
         cmd += " --privacy"
     if args.save:

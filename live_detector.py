@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 class LiveFraudDetector:
-    def __init__(self, model_path='models/saved_models/real_time_model_final.keras'):
+    def __init__(self, model_path='models/saved_models/federated_model_final.h5'):
         self.model = tf.keras.models.load_model(model_path)
         self.feature_count = self.model.input_shape[1]
         self.stats_file = 'models/saved_models/detection_stats.json'
@@ -34,37 +34,47 @@ class LiveFraudDetector:
             json.dump(self.history, f)
     
     def _calculate_thresholds(self):
-        """Dynamically calculate thresholds from historical data"""
-        if len(self.history['fraud_scores']) > 10:
-            scores = self.history['fraud_scores']
-            return {
-                'high': np.percentile(scores, 80),
-                'medium': np.percentile(scores, 60),
-                'low': np.percentile(scores, 40)
-            }
-        # Default if no history
-        return {'high': 0.7, 'medium': 0.4, 'low': 0.2}
+        """
+        Use absolute static thresholds instead of dynamic sliding percentiles.
+        Sliding percentiles mathematically force a percentage of legit transactions
+        to be blocked in highly-imbalanced streams.
+        """
+        return {
+            'high': 0.45,    # 45% probability (P99+ of risk distribution) for BLOCK
+            'medium': 0.35,  # 35% probability (P90) for FLAG
+            'low': 0.20      # Lower bounds
+        }
     
     def preprocess_transaction(self, transaction):
         """Convert any transaction format to model features"""
-        # Dynamically create features based on model input shape
+        raw_feat = transaction.pop('raw_features', None)
+        if raw_feat is not None:
+            return raw_feat.reshape(1, -1)
+            
+        # Check for HTML UI advanced manual inputs mapping
+        manual = transaction.pop('manual_override_features', None)
+        if manual is not None:
+            # Safely extract in strict alphabetical order used by the Model Aligner
+            features_list = [
+                'address_stability','amount','bank_tenure_months','credit_limit','credit_risk_score',
+                'customer_age','device_distinct_emails','device_fraud_count','device_os_encoded',
+                'email_is_free','emp_CA','emp_CB','emp_CC','emp_CD','emp_CE','emp_CF',
+                'has_other_cards','house_BA','house_BB','house_BC','house_BD','house_BE','house_BF',
+                'is_foreign_request','keep_alive','location_velocity','month','name_email_similarity',
+                'phone_valid','session_length','source_internet','time_since_request_days',
+                'velocity_24h','velocity_4w','velocity_6h'
+            ]
+            arr = np.zeros(self.feature_count)
+            for i, f in enumerate(features_list):
+                if i < self.feature_count:
+                    try:
+                        arr[i] = float(manual.get(f, 0.0))
+                    except:
+                        arr[i] = 0.0
+            return arr.reshape(1, -1)
+            
+        # Fallback if no features present
         features = np.zeros(self.feature_count)
-        
-        # Map transaction fields to features (dynamic mapping)
-        mappings = {
-            'amount': lambda x: min(x / 10000, 1.0),
-            'velocity': lambda x: min(x / 30, 1.0),
-            'card_age': lambda x: min(x / 1000, 1.0),
-        }
-        
-        for i, (key, transform) in enumerate(mappings.items()):
-            if i < self.feature_count and key in transaction:
-                features[i] = transform(transaction[key])
-        
-        # Add random variation for features without mapping (simulates real data)
-        for i in range(len(mappings), self.feature_count):
-            features[i] = np.random.uniform(0, 0.3)
-        
         return features.reshape(1, -1)
     
     def predict(self, transaction):

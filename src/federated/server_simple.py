@@ -41,35 +41,68 @@ class SimpleFederatedServer:
         logger.info(f"✅ Simple federated server initialized with {feature_count} features")
         logger.info(f"   Model architecture: {config['model']['layer1_units']}->{config['model']['layer2_units']}->{config['model']['layer3_units']}")
     
-    def aggregate_models(self, client_models, client_sizes):
+    def aggregate_models(self, client_models, client_sizes, custom_weights=None):
         """
-        Federated averaging: weight models by client data size (FedAvg)
-        
+        Federated averaging: weight models by client data size (FedAvg).
+        Optionally accepts custom_weights to override size-based weighting.
+
         Args:
             client_models: List of trained client models
             client_sizes: Number of samples from each client
-            
+            custom_weights: Optional list of floats (must sum to 1.0).
+                            If None, weights are proportional to data size.
         Returns:
             Aggregated model weights
         """
-        total_samples = sum(client_sizes)
-        
-        # Get weights from first client to know structure
-        aggregated_weights = client_models[0].get_weights()
-        
-        # Initialize with zeros
-        for i in range(len(aggregated_weights)):
-            aggregated_weights[i] = aggregated_weights[i] * 0
-        
-        # Weighted average
-        for model, n_samples in zip(client_models, client_sizes):
-            weight = n_samples / total_samples
-            model_weights = model.get_weights()
-            
-            for i in range(len(aggregated_weights)):
-                aggregated_weights[i] += weight * model_weights[i]
-        
+        if custom_weights is not None:
+            # Normalize just in case
+            total = sum(custom_weights)
+            weights = [w / total for w in custom_weights]
+        else:
+            total_samples = sum(client_sizes)
+            weights = [n / total_samples for n in client_sizes]
+
+        # Get structure from first client
+        aggregated_weights = [w * 0 for w in client_models[0].get_weights()]
+
+        for model, weight in zip(client_models, weights):
+            for i, layer_w in enumerate(model.get_weights()):
+                aggregated_weights[i] += weight * layer_w
+
         return aggregated_weights
+
+    def weighted_aggregate_models(self, client_models, client_f1_scores):
+        """
+        Inverse-performance weighted aggregation.
+
+        Clients performing WORSE get a HIGHER aggregation weight so the
+        global model is forced to pay more attention to them next round.
+
+        Example:
+            Bank1 F1 = 0.95  →  inverse = 1/0.95 = 1.05  →  low weight
+            Bank2 F1 = 0.10  →  inverse = 1/0.10 = 10.0  →  high weight
+
+        After normalisation:
+            Bank1 gets ~9.5% of the influence
+            Bank2 gets ~90.5% of the influence
+
+        Args:
+            client_models: List of trained client models
+            client_f1_scores: F1 score of global model on each client (from last eval)
+        Returns:
+            Aggregated model weights
+        """
+        # Avoid division by zero — add small epsilon
+        eps = 1e-4
+        inverse_f1 = [1.0 / (f1 + eps) for f1 in client_f1_scores]
+        total_inv   = sum(inverse_f1)
+        custom_weights = [inv / total_inv for inv in inverse_f1]
+
+        client_ids = getattr(self, '_last_client_ids', [f'client_{i}' for i in range(len(client_models))])
+        for cid, w in zip(client_ids, custom_weights):
+            logger.info(f"   ⚖️  {cid}  →  F1={client_f1_scores[client_ids.index(cid)]:.4f}  aggregation weight={w:.4f}")
+
+        return self.aggregate_models(client_models, [1]*len(client_models), custom_weights=custom_weights)
     
     def secure_aggregation(self, client_models, client_sizes, noise_scale=0.01):
         """
@@ -196,31 +229,41 @@ class SimpleFederatedServer:
                 train_data = client.get_tf_dataset(batch_size=self.config['training']['batch_size'])
                 
                 # Determine number of steps per epoch
-                steps_per_epoch = min(50, len(client.labels) // self.config['training']['batch_size'])
+                steps_per_epoch = min(500, len(client.labels) // self.config['training']['batch_size'])
                 
-                # Train the model
+                # Train the model with class weights to handle imbalance (fix: was calculated but never used!)
                 history = local_model.fit(
                     train_data,
                     epochs=self.config['training'].get('local_epochs', 1),
                     steps_per_epoch=steps_per_epoch,
+                    class_weight=client.class_weight,
                     verbose=0
                 )
                 
                 client_models.append(local_model)
-                
+
                 # Log training results
                 train_loss = history.history['loss'][0]
                 train_acc = history.history['accuracy'][0]
                 logger.info(f"   ✅ Local training - Loss: {train_loss:.4f}, Accuracy: {train_acc:.4f}")
-            
-            # Federated averaging
+
+            # ── Collect per-client F1 scores for weighted aggregation ──────────
+            client_f1_scores = []
+            self._last_client_ids = []
+            for client in clients:
+                metrics = self.evaluate_on_client(client)
+                f1 = metrics['f1']
+                client_f1_scores.append(f1)
+                self._last_client_ids.append(client.client_id)
+
+            # Federated aggregation
             if use_privacy:
                 logger.info("\n🔒 Applying secure aggregation with differential privacy...")
                 aggregated_weights = self.secure_aggregation(client_models, client_sizes)
             else:
-                logger.info("\n🔄 Applying federated averaging...")
-                aggregated_weights = self.aggregate_models(client_models, client_sizes)
-            
+                logger.info("\n⚖️  Applying INVERSE-F1 weighted aggregation...")
+                aggregated_weights = self.weighted_aggregate_models(client_models, client_f1_scores)
+
             self.global_model.set_weights(aggregated_weights)
             
             # Evaluate on both clients

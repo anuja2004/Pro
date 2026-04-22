@@ -10,11 +10,11 @@ model:
 
 # Training parameters
 training:
-  batch_size: 32
+  batch_size: 64
   client_learning_rate: 0.001
   server_learning_rate: 1.0
   clients_per_round: 2
-  local_epochs: 1
+  local_epochs: 10       # increased from 5 — more local iterations per round for deeper learning
 
 # Privacy parameters
 privacy:
